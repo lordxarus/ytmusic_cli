@@ -17,6 +17,9 @@ import (
 	"github.com/faiface/beep/effects"
 	"github.com/faiface/beep/speaker"
 	"github.com/gdamore/tcell/v2"
+	"github.com/kluctl/go-embed-python/embed_util"
+	"github.com/kluctl/go-embed-python/python"
+	"github.com/lordxarus/ytmusic_cli/internal/python-libs/data"
 	"github.com/rivo/tview"
 	"github.com/zergon321/reisen"
 )
@@ -28,6 +31,7 @@ var (
 	homePath  string
 	cachePath string
 	wdPath    string
+	app       = tview.NewApplication()
 )
 
 const (
@@ -43,6 +47,7 @@ const (
 // TODO Create and hold a streamer in global scope?
 // TODO We can rewrite this to only use beep
 // TODO Beep supports playing and pausing
+// TODO Notify the user if there isn't a valid token to use
 func main() {
 	var ok bool
 	var err error
@@ -50,7 +55,6 @@ func main() {
 	var selectedSong Song
 	var songResults []Song
 
-	var app *tview.Application = tview.NewApplication()
 	var grid *tview.Grid
 	var playButton *tview.Button
 	var songList *tview.List
@@ -186,16 +190,57 @@ func main() {
 
 func search(query string) []Song {
 	// Search
-	cmd := exec.Command(
-		"python3.11",
-		fmt.Sprintf("%s/ytmusiccli.py", wdPath),
-		"'"+query+"'",
-	)
 
-	stdout, err := cmd.Output()
+	// TODO EMBEDDED PYTHON VERSION
+	fs, err := embed_util.NewEmbeddedFiles(data.Data, "ytmusicapi")
 	if err != nil {
-		log.Fatalf("Err: '%s' while running command: %s", err.(*exec.ExitError).Stderr, cmd.String())
+		log.Printf("Failed to new embedded files %s", err)
 	}
+	ep, err := python.NewEmbeddedPython("ytmusicapi")
+	if err != nil {
+		log.Printf("Failed to created embedded python %s", err)
+	}
+	ep.AddPythonPath(fs.GetExtractedPath())
+
+	pyCmd := ep.PythonCmd("-c", fmt.Sprintf(`
+from ytmusicapi import YTMusic
+import sys
+	
+ytmusic = YTMusic("oauth.json")
+	
+res = ytmusic.search("%s", filter="songs")
+	
+import json
+	
+# https://stackoverflow.com/questions/36021332/how-to-prettyprint-human-readably-print-a-python-dict-in-json-format-double-q
+print(json.dumps(
+	res,
+	sort_keys=True,
+	indent=4,
+	separators=(',', ': ')
+))`, query))
+
+	stdout, err := pyCmd.Output()
+	if err != nil {
+		log.Printf("stderr: %s", err.(*exec.ExitError).Stderr)
+		log.Fatalf("Couldn't send command: %s to embedded python", pyCmd.String())
+	}
+
+	if stdout != nil {
+		log.Println(string(stdout))
+	}
+
+	// // TODO RUNNING PYTHON IN CLI VERSION
+	// cmd := exec.Command(
+	// 	"python3.11",
+	// 	fmt.Sprintf("%s/ytmusiccli.py", wdPath),
+	// 	"'"+query+"'",
+	// )
+
+	// stdout, err := cmd.Output()
+	// if err != nil {
+	// 	log.Fatalf("Err: '%s' while running command: %s", err.(*exec.ExitError).Stderr, cmd.String())
+	// }
 
 	songResults := make([]Song, 200)
 
