@@ -15,6 +15,7 @@ func DownloadVideo(videoId string, cacheDir string, useCache bool) {
 	if useCache {
 		_, err := os.Open(fullPath)
 		if err == nil {
+			log.Printf("Found ID: %s in cache.", videoId)
 			return
 		}
 	}

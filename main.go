@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,9 +40,24 @@ const (
 
 // TODO Can use struct tags here? https://www.digitalocean.com/community/tutorials/how-to-use-struct-tags-in-go
 
+// TODO Create and hold a streamer in global scope?
+// TODO We can rewrite this to only use beep
+// TODO Beep supports playing and pausing
 func main() {
 	var ok bool
 	var err error
+
+	var selectedSong Song
+	var songResults []Song
+
+	var app *tview.Application = tview.NewApplication()
+	var grid *tview.Grid
+	var playButton *tview.Button
+	var songList *tview.List
+
+	var volumeControl *effects.Volume
+	volumeText := tview.NewTextView().SetText("1.0")
+	volumeText.SetBorder(true)
 
 	if homePath, ok = os.LookupEnv("HOME"); !ok {
 		log.Fatalf("Couldn't lookup home directory in env")
@@ -67,22 +83,20 @@ func main() {
 		log.Fatalf("Unable to init speaker %s", err)
 	}
 
-	songResults := search("Little Big")
+	// TODO Temp
+	if len(os.Args) == 1 {
+		songResults = search("Little Big")
+	} else {
+		songResults = search(os.Args[1])
+	}
 
 	DownloadVideo(songResults[0].VideoId, cachePath, true)
-
-	var selectedSong Song
 
 	if len(songResults) > 0 {
 		selectedSong = songResults[0]
 	}
 
 	var killDecoder chan<- bool = make(chan<- bool, 1)
-
-	app := tview.NewApplication()
-	var playButton *tview.Button
-
-	songList := tview.NewList()
 
 	playLabel := func() string {
 		if isPlaying {
@@ -91,7 +105,27 @@ func main() {
 			return "Play"
 		}
 	}
+	playButton = tview.NewButton("Play").SetSelectedFunc(
+		func() {
+			log.Println("playButton:", isPlaying)
+			if isPlaying {
+				killDecoder <- true
+				speaker.Clear()
+				isPlaying = false
+			} else {
+				isPlaying = true
+				var vol float64
+				if volumeControl != nil {
+					vol = volumeControl.Volume
+				} else {
+					vol = 1.0
+				}
+				killDecoder, volumeControl = play(selectedSong, vol, false)
+			}
+			playButton.SetLabel(playLabel())
+		})
 
+	songList = tview.NewList()
 	// Add songs
 	for _, song := range songResults {
 		// Collect the artist names for this song
@@ -102,38 +136,48 @@ func main() {
 		songList.AddItem(song.Title, strings.Join(artistNames, ", "), '•', func() {
 			selectedSong = song
 			killDecoder <- true
-			killDecoder = play(song)
+			var vol float64 = 1.0
+			if volumeControl != nil {
+				vol = volumeControl.Volume
+			}
+			killDecoder, volumeControl = play(song, vol, false)
 			isPlaying = true
 			playButton.SetLabel(playLabel())
 		})
 	}
 
-	playButton = tview.NewButton("Play").SetSelectedFunc(
-		func() {
-			log.Println("playButton:", isPlaying)
-			if isPlaying {
-				killDecoder <- true
-				speaker.Clear()
-				isPlaying = false
-			} else {
-				isPlaying = true
-				killDecoder = play(selectedSong)
-			}
-			playButton.SetLabel(playLabel())
-		})
-
-	flex := tview.NewGrid().
+	grid = tview.NewGrid().
 		AddItem(songList, 0, 0, 3, 2, 0, 0, true).
-		AddItem(playButton, 5, 0, 2, 2, 0, 0, true)
+		AddItem(playButton, 5, 0, 2, 2, 0, 0, false).
+		AddItem(volumeText, 3, 0, 2, 2, 0, 0, false)
 
-	flex.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+	// Keyboard input
+	grid.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		if event.Key() == tcell.KeyEsc {
 			app.Stop()
 		}
 		return event
 	})
+	// Mouse input
+	grid.SetMouseCapture(
+		func(action tview.MouseAction, event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse) {
+			if volumeControl == nil || !volumeText.HasFocus() {
+				return action, event
+			}
 
-	frame := tview.NewFrame(flex).AddText("Youtube Music CLI", true, tview.AlignCenter, tcell.ColorHotPink)
+			if action == tview.MouseScrollUp {
+				volumeControl.Volume += .1
+			} else if action == tview.MouseScrollDown {
+				volumeControl.Volume -= .1
+			}
+
+			volStr := strconv.FormatFloat(volumeControl.Volume, 'f', 2, 64)
+			volumeText.SetText(fmt.Sprintf("Volume: %s", volStr))
+
+			return action, event
+		})
+
+	frame := tview.NewFrame(grid).AddText("Youtube Music CLI", true, tview.AlignCenter, tcell.ColorHotPink)
 
 	if err := app.SetRoot(frame, true).EnableMouse(true).Run(); err != nil {
 		log.Fatalf("Couldn't set root %s", err)
@@ -162,20 +206,19 @@ func search(query string) []Song {
 	return songResults
 }
 
-func play(song Song) chan<- bool {
+func play(song Song, volume float64, silent bool) (chan<- bool, *effects.Volume) {
 	log.Printf("Starting download of %s, ID: %s", song.Title, song.VideoId)
 	DownloadVideo(song.VideoId, cachePath, true)
-	log.Println("Download complete.")
 	_, streamer, killDecoder := loadAudio(filepath.Join(cachePath, song.VideoId+".mp4"))
-	speaker.Clear()
-	vol := effects.Volume{
+	volEffect := effects.Volume{
 		Streamer: streamer,
 		Base:     2,
-		Volume:   -10,
-		Silent:   false,
+		Volume:   volume,
+		Silent:   silent,
 	}
-	speaker.Play(vol.Streamer)
-	return killDecoder
+	speaker.Clear()
+	speaker.Play(&volEffect)
+	return killDecoder, &volEffect
 }
 
 func loadAudio(path string) (*reisen.Media, beep.Streamer, chan<- bool) {
@@ -185,15 +228,18 @@ func loadAudio(path string) (*reisen.Media, beep.Streamer, chan<- bool) {
 	}
 
 	var sampleSource <-chan [2]float64
-	sampleSource, killDecoder, _, err := readVideoAndAudio(media)
-	// go func(errs chan error) {
-	// 	for {
-	// 		err := <-errs
-	// 		if err != nil {
-	// 			log.Println(err)
-	// 		}
-	// 	}
-	// }(errs)
+	sampleSource, killDecoder, errs, err := readVideoAndAudio(media)
+	go func(errs chan error) {
+		for {
+			err, ok := <-errs
+			if !ok {
+				break
+			} else if err != nil {
+				log.Printf("Decoding error: %s", err)
+			}
+		}
+	}(errs)
+
 	streamer := createStreamer(sampleSource)
 
 	if err != nil {
