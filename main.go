@@ -37,7 +37,11 @@ var (
 	oauthToken string
 	logging    = false
 	// TODO songListDimensions So sorry....
-	songListDimensions = [6]int{1, 0, 5, 5, 1, 4}
+	/* row int, column int, rowSpan int,
+	   colSpan int, minGridHeight int,
+	   minGridWidth int
+	*/
+	songListDimensions = [6]int{1, 0, 3, 5, 1, 1}
 )
 
 const (
@@ -187,7 +191,7 @@ func main() {
 	grid = cview.NewGrid()
 	grid.AddItem(searchBox, 0, 0, 1, 3, 1, 3, false)
 	addSongList(grid, songList, &songListDimensions, false)
-	grid.AddItem(playButton, 5, 0, 1, 5, 1, 5, false)
+	grid.AddItem(playButton, 5, 0, 1, 4, 1, 4, false)
 	grid.AddItem(volumeText, 5, 5, 1, 1, 0, 0, false)
 
 	// Keyboard input
