@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -20,12 +19,13 @@ import (
 	"github.com/kluctl/go-embed-python/embed_util"
 	"github.com/kluctl/go-embed-python/python"
 	"github.com/lordxarus/ytmusic_cli/internal/python-libs/data"
+	"github.com/lordxarus/ytmusic_cli/yt"
+	"github.com/lordxarus/ytmusic_cli/yt/search"
 	"github.com/rivo/tview"
 	"github.com/zergon321/reisen"
 )
 
 var (
-	isPlaying = false
 	// Keep paths clean with no trailing slash
 	// TODO Could use filepath.Clean()
 	homePath  string
@@ -56,12 +56,17 @@ func main() {
 	var songResults []Song
 
 	var grid *tview.Grid
+	var searchBox *tview.TextArea
 	var playButton *tview.Button
 	var songList *tview.List
 
-	var volumeControl *effects.Volume
-	volumeText := tview.NewTextView().SetText("1.0")
-	volumeText.SetBorder(true)
+	var volumeEffect *effects.Volume = &effects.Volume{
+		Streamer: nil,
+		Base:     2,
+		Volume:   -1.0,
+		Silent:   false,
+	}
+	var volumeText *tview.TextView
 
 	if homePath, ok = os.LookupEnv("HOME"); !ok {
 		log.Fatalf("Couldn't lookup home directory in env")
@@ -89,71 +94,66 @@ func main() {
 
 	// TODO Temp
 	if len(os.Args) == 1 {
-		songResults = search("Little Big")
+		songResults = query("Little Big", search.Songs)
 	} else {
-		songResults = search(os.Args[1])
+		songResults = query(os.Args[1], search.Songs)
 	}
 
-	DownloadVideo(songResults[0].VideoId, cachePath, true)
+	log.Printf("%+v", songResults)
+
+	yt.DownloadVideo(songResults[0].VideoId, cachePath, true)
 
 	if len(songResults) > 0 {
 		selectedSong = songResults[0]
 	}
 
-	var killDecoder chan<- bool = make(chan<- bool, 1)
+	var killDecoder chan<- bool = make(chan<- bool, 2)
 
-	playLabel := func() string {
-		if isPlaying {
-			return "Pause"
-		} else {
-			return "Play"
-		}
-	}
+	// Build CUI
 	playButton = tview.NewButton("Play").SetSelectedFunc(
 		func() {
-			log.Println("playButton:", isPlaying)
-			if isPlaying {
+			switch playButton.GetLabel() {
+			case "Play":
+				killDecoder = play(selectedSong, volumeEffect, false)
+				playButton.SetLabel("Pause")
+			case "Pause":
 				killDecoder <- true
 				speaker.Clear()
-				isPlaying = false
-			} else {
-				isPlaying = true
-				var vol float64
-				if volumeControl != nil {
-					vol = volumeControl.Volume
-				} else {
-					vol = 1.0
-				}
-				killDecoder, volumeControl = play(selectedSong, vol, false)
+				playButton.SetLabel("Play")
 			}
-			playButton.SetLabel(playLabel())
 		})
 
-	songList = tview.NewList()
+	songList = createSongList(songResults, &selectedSong, killDecoder, volumeEffect, playButton)
 	// Add songs
-	for _, song := range songResults {
-		// Collect the artist names for this song
-		var artistNames []string
-		for _, artist := range song.Artists {
-			artistNames = append(artistNames, artist.Name)
+
+	searchBox = tview.NewTextArea()
+	searchBox.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyEnter {
+			songList = createSongList(query(searchBox.GetText(), search.Songs), &selectedSong, killDecoder, volumeEffect, playButton)
 		}
-		songList.AddItem(song.Title, strings.Join(artistNames, ", "), '•', func() {
-			selectedSong = song
-			killDecoder <- true
-			var vol float64 = 1.0
-			if volumeControl != nil {
-				vol = volumeControl.Volume
-			}
-			killDecoder, volumeControl = play(song, vol, false)
-			isPlaying = true
-			playButton.SetLabel(playLabel())
-		})
-	}
+		return event
+	})
+
+	volumeText = tview.NewTextView().SetText("Volume: 1.0")
+	volumeText.SetBorder(true)
+	volumeText.SetMouseCapture(func(action tview.MouseAction, event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse) {
+		if action == tview.MouseScrollUp {
+			volumeEffect.Volume += .1
+		} else if action == tview.MouseScrollDown {
+			volumeEffect.Volume -= .1
+		}
+
+		volStr := strconv.FormatFloat(volumeEffect.Volume, 'f', 2, 64)
+		volumeText.SetText(fmt.Sprintf("Volume: %s", volStr))
+
+		return action, event
+	})
 
 	grid = tview.NewGrid().
-		AddItem(songList, 0, 0, 3, 2, 0, 0, true).
-		AddItem(playButton, 5, 0, 2, 2, 0, 0, false).
-		AddItem(volumeText, 3, 0, 2, 2, 0, 0, false)
+		// AddItem(searchBox, 0, 0, 1, 3, 1, 3, false).
+		AddItem(songList, 1, 0, 4, 5, 1, 4, true).
+		AddItem(playButton, 5, 0, 1, 5, 1, 5, false).
+		AddItem(volumeText, 5, 5, 1, 1, 0, 0, false)
 
 	// Keyboard input
 	grid.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
@@ -162,24 +162,6 @@ func main() {
 		}
 		return event
 	})
-	// Mouse input
-	grid.SetMouseCapture(
-		func(action tview.MouseAction, event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse) {
-			if volumeControl == nil || !volumeText.HasFocus() {
-				return action, event
-			}
-
-			if action == tview.MouseScrollUp {
-				volumeControl.Volume += .1
-			} else if action == tview.MouseScrollDown {
-				volumeControl.Volume -= .1
-			}
-
-			volStr := strconv.FormatFloat(volumeControl.Volume, 'f', 2, 64)
-			volumeText.SetText(fmt.Sprintf("Volume: %s", volStr))
-
-			return action, event
-		})
 
 	frame := tview.NewFrame(grid).AddText("Youtube Music CLI", true, tview.AlignCenter, tcell.ColorHotPink)
 
@@ -188,7 +170,28 @@ func main() {
 	}
 }
 
-func search(query string) []Song {
+func createSongList(songs []Song, selectedSong *Song,
+	killDecoder chan<- bool, volumeEffect *effects.Volume,
+	playButton *tview.Button,
+) *tview.List {
+	songList := tview.NewList()
+	for _, song := range songs {
+		// Collect the artist names for this song
+		var artistNames []string
+		for _, artist := range song.Artists {
+			artistNames = append(artistNames, artist.Name)
+		}
+		songList.AddItem(song.Title, strings.Join(artistNames, ", "), '•', func() {
+			*selectedSong = song
+			killDecoder <- true
+			killDecoder = play(song, volumeEffect, false)
+			playButton.SetLabel("Pause")
+		})
+	}
+	return songList
+}
+
+func query(query string, filter search.Filter) []Song {
 	// Search
 
 	// TODO EMBEDDED PYTHON VERSION
@@ -202,13 +205,14 @@ func search(query string) []Song {
 	}
 	ep.AddPythonPath(fs.GetExtractedPath())
 
-	pyCmd := ep.PythonCmd("-c", fmt.Sprintf(`
+	pyCmd := ep.PythonCmd("-c", fmt.Sprintf(
+		`
 from ytmusicapi import YTMusic
 import sys
 	
 ytmusic = YTMusic("oauth.json")
 	
-res = ytmusic.search("%s", filter="songs")
+res = ytmusic.search("%s", filter="%s")
 	
 import json
 	
@@ -218,18 +222,10 @@ print(json.dumps(
 	sort_keys=True,
 	indent=4,
 	separators=(',', ': ')
-))`, query))
+))`,
+		query, filter))
 
-	stdout, err := pyCmd.Output()
-	if err != nil {
-		log.Printf("stderr: %s", err.(*exec.ExitError).Stderr)
-		log.Fatalf("Couldn't send command: %s to embedded python", pyCmd.String())
-	}
-
-	if stdout != nil {
-		log.Println(string(stdout))
-	}
-
+	stdout, _ := pyCmd.Output()
 	// // TODO RUNNING PYTHON IN CLI VERSION
 	// cmd := exec.Command(
 	// 	"python3.11",
@@ -251,19 +247,14 @@ print(json.dumps(
 	return songResults
 }
 
-func play(song Song, volume float64, silent bool) (chan<- bool, *effects.Volume) {
+func play(song Song, volume *effects.Volume, silent bool) chan<- bool {
 	log.Printf("Starting download of %s, ID: %s", song.Title, song.VideoId)
-	DownloadVideo(song.VideoId, cachePath, true)
+	yt.DownloadVideo(song.VideoId, cachePath, true)
 	_, streamer, killDecoder := loadAudio(filepath.Join(cachePath, song.VideoId+".mp4"))
-	volEffect := effects.Volume{
-		Streamer: streamer,
-		Base:     2,
-		Volume:   volume,
-		Silent:   silent,
-	}
+	volume.Streamer = streamer
 	speaker.Clear()
-	speaker.Play(&volEffect)
-	return killDecoder, &volEffect
+	speaker.Play(volume)
+	return killDecoder
 }
 
 func loadAudio(path string) (*reisen.Media, beep.Streamer, chan<- bool) {
