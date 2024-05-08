@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -12,34 +13,40 @@ import (
 	"strings"
 	"time"
 
+	"code.rocketnine.space/tslocum/cview"
 	"github.com/faiface/beep"
 	"github.com/faiface/beep/effects"
 	"github.com/faiface/beep/speaker"
 	"github.com/gdamore/tcell/v2"
+	"github.com/joho/godotenv"
 	"github.com/kluctl/go-embed-python/embed_util"
 	"github.com/kluctl/go-embed-python/python"
 	"github.com/lordxarus/ytmusic_cli/internal/python-libs/data"
 	"github.com/lordxarus/ytmusic_cli/yt"
 	"github.com/lordxarus/ytmusic_cli/yt/search"
-	"github.com/rivo/tview"
 	"github.com/zergon321/reisen"
 )
 
 var (
 	// Keep paths clean with no trailing slash
 	// TODO Could use filepath.Clean()
-	homePath  string
-	cachePath string
-	wdPath    string
-	app       = tview.NewApplication()
+	homePath   string
+	cachePath  string
+	wdPath     string
+	app        = cview.NewApplication()
+	oauthToken string
+	logging    = false
+	// TODO songListDimensions So sorry....
+	songListDimensions = [6]int{1, 0, 5, 5, 1, 4}
 )
 
 const (
-	sampleRate                        = 44100
-	channelCount                      = 2
-	bitDepth                          = 8
-	sampleBufferSize                  = 32 * channelCount * bitDepth * 1024
-	SpeakerSampleRate beep.SampleRate = 44100
+	sampleRate                             = 44100
+	channelCount                           = 2
+	bitDepth                               = 8
+	sampleBufferSize                       = 32 * channelCount * bitDepth * 1024
+	SpeakerSampleRate      beep.SampleRate = 44100
+	gKillDecoderBufferSize                 = 50
 )
 
 // TODO Can use struct tags here? https://www.digitalocean.com/community/tutorials/how-to-use-struct-tags-in-go
@@ -49,16 +56,35 @@ const (
 // TODO Beep supports playing and pausing
 // TODO Notify the user if there isn't a valid token to use
 func main() {
+	if err := godotenv.Load(); err != nil {
+		log.Fatal("For now you have to set your oauth token through a .env file. Bye-bye.")
+	} else {
+		oauthToken = os.Getenv("OAUTH_TOKEN")
+		if oauthToken == "" {
+			log.Fatalf("No OAUTH_TOKEN in .env")
+		}
+		logVar := os.Getenv("LOGGING")
+		if logVar != "" {
+			logging, err = strconv.ParseBool(logVar)
+			if err != nil {
+				if !logging {
+					log.Println("Disabling logging. Bye-bye.")
+					log.SetOutput(io.Discard)
+				}
+			}
+		}
+	}
+
 	var ok bool
 	var err error
 
-	var selectedSong Song
-	var songResults []Song
+	var selectedSong yt.Song
+	var songResults []yt.Song
 
-	var grid *tview.Grid
-	var searchBox *tview.TextArea
-	var playButton *tview.Button
-	var songList *tview.List
+	var grid *cview.Grid
+	var searchBox *cview.InputField
+	var playButton *cview.Button
+	var songList *cview.List
 
 	var volumeEffect *effects.Volume = &effects.Volume{
 		Streamer: nil,
@@ -66,7 +92,7 @@ func main() {
 		Volume:   -1.0,
 		Silent:   false,
 	}
-	var volumeText *tview.TextView
+	var volumeText *cview.TextView
 
 	if homePath, ok = os.LookupEnv("HOME"); !ok {
 		log.Fatalf("Couldn't lookup home directory in env")
@@ -99,21 +125,21 @@ func main() {
 		songResults = query(os.Args[1], search.Songs)
 	}
 
-	log.Printf("%+v", songResults)
-
 	yt.DownloadVideo(songResults[0].VideoId, cachePath, true)
 
 	if len(songResults) > 0 {
 		selectedSong = songResults[0]
 	}
 
-	var killDecoder chan<- bool = make(chan<- bool, 2)
+	var killDecoder chan<- bool = make(chan<- bool, gKillDecoderBufferSize)
 
 	// Build CUI
-	playButton = tview.NewButton("Play").SetSelectedFunc(
+	playButton = cview.NewButton("Play")
+	playButton.SetSelectedFunc(
 		func() {
 			switch playButton.GetLabel() {
 			case "Play":
+				log.Printf("playButton: selected song: %+v", selectedSong)
 				killDecoder = play(selectedSong, volumeEffect, false)
 				playButton.SetLabel("Pause")
 			case "Pause":
@@ -126,20 +152,29 @@ func main() {
 	songList = createSongList(songResults, &selectedSong, killDecoder, volumeEffect, playButton)
 	// Add songs
 
-	searchBox = tview.NewTextArea()
-	searchBox.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Key() == tcell.KeyEnter {
-			songList = createSongList(query(searchBox.GetText(), search.Songs), &selectedSong, killDecoder, volumeEffect, playButton)
+	searchBox = cview.NewInputField()
+	searchBox.SetLabel("Search: ")
+	searchBox.SetDoneFunc(func(key tcell.Key) {
+		if key == tcell.KeyEnter {
+			log.Println("enter")
+			newList := createSongList(query(searchBox.GetText(), search.Songs), &selectedSong, killDecoder, volumeEffect, playButton)
+			app.Lock()
+			grid.RemoveItem(songList)
+			addSongList(grid, newList, &songListDimensions, false)
+			songList = newList
+			app.Unlock()
+			app.Draw()
+			log.Printf("%+v", songList)
 		}
-		return event
 	})
 
-	volumeText = tview.NewTextView().SetText("Volume: 1.0")
+	volumeText = cview.NewTextView()
+	volumeText.SetText("Volume: 1.0")
 	volumeText.SetBorder(true)
-	volumeText.SetMouseCapture(func(action tview.MouseAction, event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse) {
-		if action == tview.MouseScrollUp {
+	volumeText.SetMouseCapture(func(action cview.MouseAction, event *tcell.EventMouse) (cview.MouseAction, *tcell.EventMouse) {
+		if action == cview.MouseScrollUp {
 			volumeEffect.Volume += .1
-		} else if action == tview.MouseScrollDown {
+		} else if action == cview.MouseScrollDown {
 			volumeEffect.Volume -= .1
 		}
 
@@ -149,11 +184,11 @@ func main() {
 		return action, event
 	})
 
-	grid = tview.NewGrid().
-		// AddItem(searchBox, 0, 0, 1, 3, 1, 3, false).
-		AddItem(songList, 1, 0, 4, 5, 1, 4, true).
-		AddItem(playButton, 5, 0, 1, 5, 1, 5, false).
-		AddItem(volumeText, 5, 5, 1, 1, 0, 0, false)
+	grid = cview.NewGrid()
+	grid.AddItem(searchBox, 0, 0, 1, 3, 1, 3, false)
+	addSongList(grid, songList, &songListDimensions, false)
+	grid.AddItem(playButton, 5, 0, 1, 5, 1, 5, false)
+	grid.AddItem(volumeText, 5, 5, 1, 1, 0, 0, false)
 
 	// Keyboard input
 	grid.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
@@ -163,35 +198,47 @@ func main() {
 		return event
 	})
 
-	frame := tview.NewFrame(grid).AddText("Youtube Music CLI", true, tview.AlignCenter, tcell.ColorHotPink)
+	frame := cview.NewFrame(grid)
+	frame.AddText("Youtube Music CLI", true, cview.AlignCenter, tcell.ColorHotPink)
 
-	if err := app.SetRoot(frame, true).EnableMouse(true).Run(); err != nil {
-		log.Fatalf("Couldn't set root %s", err)
+	app.SetRoot(frame, true)
+	app.EnableMouse(true)
+	if err := app.Run(); err != nil {
+		log.Fatalf("Failed to run app: %s", err)
 	}
 }
 
-func createSongList(songs []Song, selectedSong *Song,
+// TODO REMOVE THIS
+func addSongList(grid *cview.Grid, list *cview.List, dim *[6]int, focus bool) {
+	grid.AddItem(list, dim[0], dim[1], dim[2], dim[3], dim[4], dim[5], focus)
+}
+
+func createSongList(songs []yt.Song, selectedSong *yt.Song,
 	killDecoder chan<- bool, volumeEffect *effects.Volume,
-	playButton *tview.Button,
-) *tview.List {
-	songList := tview.NewList()
+	playButton *cview.Button,
+) *cview.List {
+	songList := cview.NewList()
 	for _, song := range songs {
 		// Collect the artist names for this song
 		var artistNames []string
 		for _, artist := range song.Artists {
 			artistNames = append(artistNames, artist.Name)
 		}
-		songList.AddItem(song.Title, strings.Join(artistNames, ", "), '•', func() {
-			*selectedSong = song
-			killDecoder <- true
-			killDecoder = play(song, volumeEffect, false)
-			playButton.SetLabel("Pause")
-		})
+		li := cview.NewListItem(song.Title)
+		li.SetSecondaryText(fmt.Sprintf("%s - %s", strings.Join(artistNames, ", "), song.Duration))
+		li.SetSelectedFunc(
+			func() {
+				*selectedSong = song
+				killDecoder <- true
+				killDecoder = play(song, volumeEffect, false)
+				playButton.SetLabel("Pause")
+			})
+		songList.AddItem(li)
 	}
 	return songList
 }
 
-func query(query string, filter search.Filter) []Song {
+func query(query string, filter search.Filter) []yt.Song {
 	// Search
 
 	// TODO EMBEDDED PYTHON VERSION
@@ -210,7 +257,7 @@ func query(query string, filter search.Filter) []Song {
 from ytmusicapi import YTMusic
 import sys
 	
-ytmusic = YTMusic("oauth.json")
+ytmusic = YTMusic('%s')
 	
 res = ytmusic.search("%s", filter="%s")
 	
@@ -223,22 +270,31 @@ print(json.dumps(
 	indent=4,
 	separators=(',', ': ')
 ))`,
-		query, filter))
+		oauthToken, query, filter))
+
+	// 	log.Printf(
+	// 		`
+	// from ytmusicapi import YTMusic
+	// import sys
+
+	// ytmusic = YTMusic('%s')
+
+	// res = ytmusic.search("%s", filter="%s")
+
+	// import json
+
+	// # https://stackoverflow.com/questions/36021332/how-to-prettyprint-human-readably-print-a-python-dict-in-json-format-double-q
+	// print(json.dumps(
+	// 	res,
+	// 	sort_keys=True,
+	// 	indent=4,
+	// 	separators=(',', ': ')
+	// ))`,
+	// 		oauthToken, query, filter)
 
 	stdout, _ := pyCmd.Output()
-	// // TODO RUNNING PYTHON IN CLI VERSION
-	// cmd := exec.Command(
-	// 	"python3.11",
-	// 	fmt.Sprintf("%s/ytmusiccli.py", wdPath),
-	// 	"'"+query+"'",
-	// )
 
-	// stdout, err := cmd.Output()
-	// if err != nil {
-	// 	log.Fatalf("Err: '%s' while running command: %s", err.(*exec.ExitError).Stderr, cmd.String())
-	// }
-
-	songResults := make([]Song, 200)
+	songResults := make([]yt.Song, 0, 200)
 
 	err = json.Unmarshal(stdout, &songResults) // https://betterstack.com/community/guides/scaling-go/json-in-go/
 	if err != nil {
@@ -247,7 +303,7 @@ print(json.dumps(
 	return songResults
 }
 
-func play(song Song, volume *effects.Volume, silent bool) chan<- bool {
+func play(song yt.Song, volume *effects.Volume, silent bool) chan<- bool {
 	log.Printf("Starting download of %s, ID: %s", song.Title, song.VideoId)
 	yt.DownloadVideo(song.VideoId, cachePath, true)
 	_, streamer, killDecoder := loadAudio(filepath.Join(cachePath, song.VideoId+".mp4"))
@@ -264,7 +320,7 @@ func loadAudio(path string) (*reisen.Media, beep.Streamer, chan<- bool) {
 	}
 
 	var sampleSource <-chan [2]float64
-	sampleSource, killDecoder, errs, err := readVideoAndAudio(media)
+	sampleSource, killDecoder, errs, err := readVideoAndAudio(media, gKillDecoderBufferSize)
 	go func(errs chan error) {
 		for {
 			err, ok := <-errs
@@ -289,10 +345,10 @@ func loadAudio(path string) (*reisen.Media, beep.Streamer, chan<- bool) {
 // readVideoAndAudio reads video and audio frames
 // from the opened media and sends the decoded
 // data to che channels to be played.
-func readVideoAndAudio(media *reisen.Media) (<-chan [2]float64, chan<- bool, chan error, error) {
+func readVideoAndAudio(media *reisen.Media, killDecoderBufferSize int) (<-chan [2]float64, chan<- bool, chan error, error) {
 	sampleBuffer := make(chan [2]float64, sampleBufferSize)
 	errs := make(chan error)
-	killDecoder := make(chan bool, 2)
+	killDecoder := make(chan bool, killDecoderBufferSize)
 
 	err := media.OpenDecode()
 	if err != nil {

@@ -3,15 +3,16 @@ module github.com/lordxarus/ytmusic_cli
 go 1.22.1
 
 require (
+	code.rocketnine.space/tslocum/cview v1.5.9
 	github.com/faiface/beep v1.1.0
 	github.com/gdamore/tcell/v2 v2.7.4
 	github.com/kkdai/youtube/v2 v2.10.1
 	github.com/kluctl/go-embed-python v0.0.0-3.12.2-20240224-3
-	github.com/rivo/tview v0.0.0-20240501114654-1f4d5e8f881d
 	github.com/zergon321/reisen v0.1.9
 )
 
 require (
+	code.rocketnine.space/tslocum/cbind v0.1.5 // indirect
 	github.com/bitly/go-simplejson v0.5.1 // indirect
 	github.com/dlclark/regexp2 v1.11.0 // indirect
 	github.com/dop251/goja v0.0.0-20240220182346-e401ed450204 // indirect
@@ -20,6 +21,7 @@ require (
 	github.com/gobwas/glob v0.2.3 // indirect
 	github.com/google/pprof v0.0.0-20240227163752-401108e1b7e7 // indirect
 	github.com/hajimehoshi/oto v0.7.1 // indirect
+	github.com/joho/godotenv v1.5.1 // indirect
 	github.com/lucasb-eyer/go-colorful v1.2.0 // indirect
 	github.com/mattn/go-runewidth v0.0.15 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
