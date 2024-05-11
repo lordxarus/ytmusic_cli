@@ -82,7 +82,6 @@ func main() {
 	var ok bool
 	var err error
 
-	var selectedSong yt.Song
 	var songResults []yt.Song
 
 	var grid *cview.Grid
@@ -129,13 +128,9 @@ func main() {
 		songResults = query(os.Args[1], search.Songs)
 	}
 
+	killDecoder := make(chan bool, 10)
+
 	yt.DownloadVideo(songResults[0].VideoId, cachePath, true)
-
-	if len(songResults) > 0 {
-		selectedSong = songResults[0]
-	}
-
-	var killDecoder chan<- bool = make(chan<- bool, gKillDecoderBufferSize)
 
 	// Build CUI
 	playButton = cview.NewButton("Play")
@@ -143,32 +138,37 @@ func main() {
 		func() {
 			switch playButton.GetLabel() {
 			case "Play":
-				log.Printf("playButton: selected song: %+v", selectedSong)
-				killDecoder = play(selectedSong, volumeEffect, false)
+				ss := songList.GetCurrentItem().GetReference().(yt.Song)
+				log.Printf("playButton: selected song: %+v", ss)
+				play(ss, volumeEffect, killDecoder)
 				playButton.SetLabel("Pause")
 			case "Pause":
 				killDecoder <- true
-				speaker.Clear()
 				playButton.SetLabel("Play")
 			}
 		})
 
-	songList = createSongList(songResults, &selectedSong, killDecoder, volumeEffect, playButton)
-	// Add songs
+	slSelected := func() {
+		// *selectedSong = song
+		killDecoder <- true
+		time.Sleep(100 * time.Millisecond)
+		play(songList.GetCurrentItem().GetReference().(yt.Song), volumeEffect, killDecoder)
+		playButton.SetLabel("Pause")
+	}
+	songList = createSongList(songResults, volumeEffect, playButton, slSelected)
 
+	// Search box
 	searchBox = cview.NewInputField()
 	searchBox.SetLabel("Search: ")
 	searchBox.SetDoneFunc(func(key tcell.Key) {
 		if key == tcell.KeyEnter {
-			log.Println("enter")
-			newList := createSongList(query(searchBox.GetText(), search.Songs), &selectedSong, killDecoder, volumeEffect, playButton)
+			newList := createSongList(query(searchBox.GetText(), search.Songs), volumeEffect, playButton, slSelected)
 			app.Lock()
 			grid.RemoveItem(songList)
 			addSongList(grid, newList, &songListDimensions, false)
 			songList = newList
 			app.Unlock()
 			app.Draw()
-			log.Printf("%+v", songList)
 		}
 	})
 
@@ -217,9 +217,10 @@ func addSongList(grid *cview.Grid, list *cview.List, dim *[6]int, focus bool) {
 	grid.AddItem(list, dim[0], dim[1], dim[2], dim[3], dim[4], dim[5], focus)
 }
 
-func createSongList(songs []yt.Song, selectedSong *yt.Song,
-	killDecoder chan<- bool, volumeEffect *effects.Volume,
+func createSongList(songs []yt.Song,
+	volumeEffect *effects.Volume,
 	playButton *cview.Button,
+	selectedFunc func(),
 ) *cview.List {
 	songList := cview.NewList()
 	for _, song := range songs {
@@ -230,13 +231,8 @@ func createSongList(songs []yt.Song, selectedSong *yt.Song,
 		}
 		li := cview.NewListItem(song.Title)
 		li.SetSecondaryText(fmt.Sprintf("%s - %s", strings.Join(artistNames, ", "), song.Duration))
-		li.SetSelectedFunc(
-			func() {
-				*selectedSong = song
-				killDecoder <- true
-				killDecoder = play(song, volumeEffect, false)
-				playButton.SetLabel("Pause")
-			})
+		li.SetReference(song)
+		li.SetSelectedFunc(selectedFunc)
 		songList.AddItem(li)
 	}
 	return songList
@@ -276,26 +272,6 @@ print(json.dumps(
 ))`,
 		oauthToken, query, filter))
 
-	// 	log.Printf(
-	// 		`
-	// from ytmusicapi import YTMusic
-	// import sys
-
-	// ytmusic = YTMusic('%s')
-
-	// res = ytmusic.search("%s", filter="%s")
-
-	// import json
-
-	// # https://stackoverflow.com/questions/36021332/how-to-prettyprint-human-readably-print-a-python-dict-in-json-format-double-q
-	// print(json.dumps(
-	// 	res,
-	// 	sort_keys=True,
-	// 	indent=4,
-	// 	separators=(',', ': ')
-	// ))`,
-	// 		oauthToken, query, filter)
-
 	stdout, _ := pyCmd.Output()
 
 	songResults := make([]yt.Song, 0, 200)
@@ -307,24 +283,23 @@ print(json.dumps(
 	return songResults
 }
 
-func play(song yt.Song, volume *effects.Volume, silent bool) chan<- bool {
+func play(song yt.Song, volume *effects.Volume, kill <-chan bool) {
 	log.Printf("Starting download of %s, ID: %s", song.Title, song.VideoId)
 	yt.DownloadVideo(song.VideoId, cachePath, true)
-	_, streamer, killDecoder := loadAudio(filepath.Join(cachePath, song.VideoId+".mp4"))
+	_, streamer := loadAudio(filepath.Join(cachePath, song.VideoId+".mp4"), kill)
 	volume.Streamer = streamer
 	speaker.Clear()
 	speaker.Play(volume)
-	return killDecoder
 }
 
-func loadAudio(path string) (*reisen.Media, beep.Streamer, chan<- bool) {
+func loadAudio(path string, killDecoder <-chan bool) (*reisen.Media, beep.Streamer) {
 	media, err := reisen.NewMedia(path)
 	if err != nil {
 		log.Fatalf("Unable to create new media %s", err)
 	}
 
 	var sampleSource <-chan [2]float64
-	sampleSource, killDecoder, errs, err := readVideoAndAudio(media, gKillDecoderBufferSize)
+	sampleSource, errs, err := readVideoAndAudio(media, gKillDecoderBufferSize, killDecoder)
 	go func(errs chan error) {
 		for {
 			err, ok := <-errs
@@ -342,21 +317,20 @@ func loadAudio(path string) (*reisen.Media, beep.Streamer, chan<- bool) {
 		log.Fatalf("Can't readVideoAndAudio %s", err)
 	}
 
-	return media, streamer, killDecoder
+	return media, streamer
 }
 
 // https://medium.com/@maximgradan/playing-videos-with-golang-83e67447b111
 // readVideoAndAudio reads video and audio frames
 // from the opened media and sends the decoded
 // data to che channels to be played.
-func readVideoAndAudio(media *reisen.Media, killDecoderBufferSize int) (<-chan [2]float64, chan<- bool, chan error, error) {
+func readVideoAndAudio(media *reisen.Media, killDecoderBufferSize int, kill <-chan bool) (<-chan [2]float64, chan error, error) {
 	sampleBuffer := make(chan [2]float64, sampleBufferSize)
-	errs := make(chan error)
-	killDecoder := make(chan bool, killDecoderBufferSize)
+	errs := make(chan error, 50)
 
 	err := media.OpenDecode()
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 
 	var audioStream *reisen.AudioStream = nil
@@ -374,85 +348,103 @@ func readVideoAndAudio(media *reisen.Media, killDecoderBufferSize int) (<-chan [
 
 	err = audioStream.Open()
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
+	}
+
+	// Clear kill channel
+L:
+	for {
+		select {
+		case <-kill:
+		default:
+			break L
+		}
 	}
 
 	go func() {
 	Loop:
 		for {
 			select {
-			case <-killDecoder:
-				log.Println("Killing decoder!")
+			case <-kill:
 				break Loop
 			default:
-				packet, gotPacket, err := media.ReadPacket()
+				log.Println("default")
+			}
+
+			packet, gotPacket, err := media.ReadPacket()
+			if err != nil {
+				go func(err error) {
+					errs <- err
+				}(err)
+			}
+
+			if !gotPacket {
+				log.Println("Break loop, no packet.")
+				break Loop
+			}
+
+			switch packet.Type() {
+			case reisen.StreamAudio:
+				s := media.Streams()[packet.StreamIndex()].(*reisen.AudioStream)
+				audioFrame, gotFrame, err := s.ReadAudioFrame()
 				if err != nil {
 					go func(err error) {
 						errs <- err
 					}(err)
 				}
 
-				if !gotPacket {
-					break
+				if !gotFrame {
+					log.Println("Break loop, no frame.")
+
+					break Loop
 				}
 
-				switch packet.Type() {
-				case reisen.StreamAudio:
-					s := media.Streams()[packet.StreamIndex()].(*reisen.AudioStream)
-					audioFrame, gotFrame, err := s.ReadAudioFrame()
+				if audioFrame == nil {
+					log.Println("Break loop, no audio frame.")
+					break Loop
+				}
+
+				// Turn the raw byte data into
+				// audio samples of type [2]float64.
+				reader := bytes.NewReader(audioFrame.Data())
+
+				// See the README.md file for
+				// detailed scheme of the sample structure.
+				for reader.Len() > 0 {
+					sample := [2]float64{0, 0}
+					var result float64
+					err = binary.Read(reader, binary.LittleEndian, &result)
 					if err != nil {
 						go func(err error) {
 							errs <- err
 						}(err)
 					}
 
-					if !gotFrame {
-						break
+					sample[0] = result
+
+					err = binary.Read(reader, binary.LittleEndian, &result)
+					if err != nil {
+						go func(err error) {
+							errs <- err
+						}(err)
 					}
 
-					if audioFrame == nil {
-						continue
-					}
-
-					// Turn the raw byte data into
-					// audio samples of type [2]float64.
-					reader := bytes.NewReader(audioFrame.Data())
-
-					// See the README.md file for
-					// detailed scheme of the sample structure.
-					for reader.Len() > 0 {
-						sample := [2]float64{0, 0}
-						var result float64
-						err = binary.Read(reader, binary.LittleEndian, &result)
-						if err != nil {
-							go func(err error) {
-								errs <- err
-							}(err)
-						}
-
-						sample[0] = result
-
-						err = binary.Read(reader, binary.LittleEndian, &result)
-						if err != nil {
-							go func(err error) {
-								errs <- err
-							}(err)
-						}
-
-						sample[1] = result
-						sampleBuffer <- sample
-					}
+					sample[1] = result
+					sampleBuffer <- sample
 				}
 			}
+
 		}
 
+		log.Printf("Decoder goroutine exiting.")
 		audioStream.Close()
 		media.CloseDecode()
 		close(sampleBuffer)
 		close(errs)
+		speaker.Clear()
 	}()
 
-	return sampleBuffer, killDecoder, errs, nil
+	return sampleBuffer, errs, nil
 }
 
 // streamSamples creates a new custom streamer for
