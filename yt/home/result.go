@@ -31,42 +31,31 @@ package home
 
 // }
 
-type (
-	CommonResult interface {
-		Year() string
-		BrowseId() string
-		// Type() ResultType
-	}
-
-	ResultData struct {
-		Year     string `json:"year"`
-		BrowseId string `json:"browseId"`
-		Type     string `json:"type"`
-	}
-)
-
-type SongResult struct {
-	ResultData
+type Result struct {
+	VideoId  string `json:"videoId"`
+	Title    string `json:"title"`
+	Year     string `json:"year"`
+	BrowseId string `json:"browseId"`
+	Type     string `json:"type"`
 }
 
-func (s *SongResult) Year() string {
-	return s.ResultData.Year
+func (s *Result) GetYear() string {
+	return s.Year
 }
 
-func (s *SongResult) BrowseId() string {
-	return s.ResultData.BrowseId
+func (s *Result) GetBrowseId() string {
+	return s.BrowseId
 }
 
 // func (s *SongResult) Type() ResultType {
 // 	return s.ResultData.Type
 // }
 
-type (
-	HomeResults struct {
-		Content []CommonResult
-		Title   string
-	}
-)
+type ResultList struct {
+	Title    string
+	Contents []Result
+}
+type Results []ResultList
 
 // 	Result struct {
 // 		Title string

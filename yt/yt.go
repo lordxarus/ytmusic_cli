@@ -1,52 +1,178 @@
 package yt
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/kkdai/youtube/v2"
+	"github.com/lordxarus/ytmusic_cli/yt/home"
+	"github.com/lordxarus/ytmusic_cli/yt/search"
+	"github.com/pkg/errors"
+	"github.com/sanity-io/litter"
 )
 
-func DownloadVideo(videoId string, cacheDir string, useCache bool) {
-	fullPath := cacheDir + "/" + videoId + ".mp4"
+type YTMClient struct {
+	oauthToken string
+	brandId    string
+}
+
+func New(token string, id string) *YTMClient {
+	return &YTMClient{
+		token,
+		id,
+	}
+}
+
+func DownloadVideo(videoId string, cacheDir string, useCache bool) error {
+	fullPath := filepath.Join(cacheDir, videoId+".mp4")
 	if useCache {
 		_, err := os.Open(fullPath)
 		if err == nil {
-			log.Printf("Found ID: %s in cache.", videoId)
-			return
+			log.Printf("found %s in cache", videoId)
+			return nil
 		}
 	}
 	client := youtube.Client{}
 
 	video, err := client.GetVideo(videoId)
 	if err != nil {
-		panic(err)
+		return fmt.Errorf("DownloadVideo(): failed to get video: %w", err)
 	}
 
 	formats := video.Formats.WithAudioChannels() // only get videos with audio
+
 	stream, _, err := client.GetStream(video, &formats[0])
 	if err != nil {
-		panic(err)
+		return fmt.Errorf("DownloadVideo(): failed to get stream: %w", err)
 	}
 	defer stream.Close()
 
 	file, err := os.Create(fullPath)
 	if err != nil {
-		log.Fatalf("Couldn't cache %s. Err: %s", fullPath, err)
+		return fmt.Errorf("DownloadVideo(): failed to create file, %s for %s: %w", fullPath, videoId, err)
 	}
 	defer file.Close()
 
 	_, err = io.Copy(file, stream)
 	if err != nil {
-		panic(err)
+		return fmt.Errorf("DownloadVideo(): failed to copy stream to file, %s: %w", fullPath, err)
 	}
+
+	return nil
 }
 
-func Search(query string) []Song {
+func (ytm *YTMClient) GetSong(videoId string) (map[string]any, error) {
+	song := make(map[string]any)
+	var returnErr error
+	result, err := ytm.runPyScript(fmt.Sprintf("ytmusic.get_song('%s')", videoId))
+	if err != nil {
+		return nil, errors.Wrapf(err, "GetSong() failed getting song")
+	}
+
+	err = json.Unmarshal([]byte(result), &song)
+	if err != nil {
+		return nil, errors.Wrap(err, "GetSong() unable to unmarshal JSON")
+	}
+	return song, returnErr
+}
+
+func (ytm *YTMClient) Home() (home.Results, error) {
+	results := make(home.Results, 3)
+	var returnErr error
+
+	result, err := ytm.runPyScript("ytmusic.get_home()")
+	if err != nil {
+		return nil, errors.Wrap(err, "Home() failed getting home results")
+	}
+
+	err = json.Unmarshal([]byte(result), &results) // https://betterstack.com/community/guides/scaling-go/json-in-go/
+	if err != nil {
+		returnErr = errors.Wrap(err, "Home() unable to marshal JSON")
+	}
+
+	return results, returnErr
+}
+
+func (ytm *YTMClient) Query(query string, filter search.Filter) ([]Song, error) {
+	var returnErr error
+
+	result, err := ytm.runPyScript(fmt.Sprintf("ytmusic.search('%s', filter='%s')", query, filter))
+	if err != nil {
+		return nil, err
+	}
+
+	songResults := make([]Song, 50)
+
+	err = json.Unmarshal([]byte(result), &songResults) // https://betterstack.com/community/guides/scaling-go/json-in-go/
+	if err != nil {
+		returnErr = fmt.Errorf("Query(): unable to marshal JSON: %w", err)
+	}
+	return songResults, returnErr
+}
+
+func (ytm *YTMClient) AddToHistory(videoId string) error {
+	res, err := ytm.runPyScript(fmt.Sprintf("ytmusic.add_to_history('%s')", videoId))
+	if err != nil {
+		return fmt.Errorf("AddToHistory(): failed to add to history: %w", err)
+	}
+	log.Printf("AddToHistory(): %s", litter.Sdump(res))
 	return nil
+}
+
+func (ytm *YTMClient) runPyScript(script string) (string, error) {
+	var returnErr error
+	if ytm.oauthToken == "" {
+		return "", errors.New("no OAuth token provided. can't run python script")
+	}
+	// Search
+
+	// // TODO EMBEDDED PYTHON VERSION
+	// fs, err := embed_util.NewEmbeddedFiles(data.Data, "ytmusicapi")
+	// if err != nil {
+	// 	log.Printf("Failed to new embedded files %s", err)
+	// }
+	// ep, err := python.NewEmbeddedPython("ytmusicapi")
+	// if err != nil {
+	// 	log.Printf("Failed to created embedded python %s", err)
+	// }
+	// ep.AddPythonPath(fs.GetExtractedPath())
+
+	cmd := exec.Command("python3", "-c", fmt.Sprintf(`
+from ytmusicapi import YTMusic
+import sys
+	
+ytmusic = YTMusic('%s', '%s')
+	
+res = %s
+	
+import json
+			
+# https://stackoverflow.com/questions/36021332/how-to-prettyprint-human-readably-print-a-python-dict-in-json-format-double-q
+print(json.dumps(
+	res,
+	sort_keys=True,
+	indent=4,
+	separators=(',', ': ')
+))`, ytm.oauthToken, ytm.brandId, script))
+
+	stdout, err := cmd.Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		ok := errors.As(err, &exitErr)
+		if ok {
+			returnErr = fmt.Errorf("runPyScript(): failed to run python script, stderr: %s, %w", exitErr.Stderr, err)
+		} else {
+			returnErr = fmt.Errorf("runPyScipt(): failed to run python script, err is not an ExitError?? %w", err)
+		}
+	}
+
+	return string(stdout), returnErr
 }
 
 // Example usage for playlists: downloading and checking information.
