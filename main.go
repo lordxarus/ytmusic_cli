@@ -60,17 +60,23 @@ const (
 func main() {
 	var ok bool
 	var err error
-
 	var songResults []yt.Song
 
 	var rootFlex *cview.Flex
 	var songFlex *cview.Flex
+	var navFlex *cview.Flex
 	var controlsFlex *cview.Flex
 
 	var searchBox *cview.InputField
+
 	var playButton *cview.Button
+	pauseLabel := "⏸️"
+	playLabel := "▶️"
+
 	var songList *cview.List
 	var progressBar *cview.ProgressBar
+
+	var volumeText *cview.TextView
 
 	var volumeEffect *effects.Volume = &effects.Volume{
 		Streamer: nil,
@@ -78,7 +84,6 @@ func main() {
 		Volume:   -1.0,
 		Silent:   false,
 	}
-	var volumeText *cview.TextView
 
 	if err := godotenv.Load(); err != nil {
 		log.Fatal("set your oauth token through a .env file")
@@ -146,22 +151,23 @@ func main() {
 		log.Fatalf("main() failed to download video: %s", err)
 	}
 
+	// Called when a song is selected on the songList or when play is pressed
 	songSelected := func() {
 		// *selectedSong = song
-		ss, ok := songList.GetCurrentItem().GetReference().(yt.Song)
+		song, ok := songList.GetCurrentItem().GetReference().(yt.Song)
 		if !ok {
 			log.Printf("playButton: no song selected, skipping")
 			return
 		}
 		now := time.Now()
-		done := now.Add(time.Second * time.Duration(ss.Duration_Seconds))
+		done := now.Add(time.Second * time.Duration(song.Duration_Seconds))
 		log.Printf("playButton: starting at: %s. expected song end: %s",
 			now.Format(time.Stamp), done.Format(time.Stamp))
-		err = play(ss, volumeEffect, killDecoder)
+		err = play(song, volumeEffect, killDecoder)
 		if err != nil {
 			log.Fatalf("playButton: failed to play: %s", err)
 		}
-		playButton.SetLabel("Pause")
+		playButton.SetLabel(pauseLabel)
 	}
 
 	// Build CUI
@@ -169,15 +175,25 @@ func main() {
 	// Play button
 	// Can actually use VolumeEffect to control play/pause
 	// when you set silent to true it will pause the stream
-	playButton = cview.NewButton("Play")
+	playButton = cview.NewButton(playLabel)
+	playButton.SetPadding(0, 1, 0, 0)
 	playButton.SetSelectedFunc(
 		func() {
 			switch playButton.GetLabel() {
-			case "Play":
+			case playLabel:
 				songSelected()
-			case "Pause":
+			case pauseLabel:
 				killDecoder <- true
-				playButton.SetLabel("Play")
+				// TODO Maybe VolumeEffect.Silent
+				// should be the play/pause state. Because if a user mutes the volume
+				// it will as of now pause anyway which isn't really the behavior I want
+				// out of a mute button. Might as well just use VolumeEffect.Silent instead of playButton.GetLabel()
+				// Remove the middle mouse handler code and add it here instead
+				// need to read up on concurrency in go more
+				// Although as I think about it, pausing on mute isn't a bad feature at all
+				// https://golang.org/doc/effective_go.html#concurrency
+				// volumeEffect.Silent = true
+				playButton.SetLabel(playLabel)
 			}
 		})
 
@@ -188,6 +204,7 @@ func main() {
 	// Search box
 	searchBox = cview.NewInputField()
 	searchBox.SetLabel("Search: ")
+	searchBox.SetBorder(true)
 	searchBox.SetDoneFunc(func(key tcell.Key) {
 		if key == tcell.KeyEnter {
 			query, err := ytm.Query(searchBox.GetText(), search.Songs)
@@ -244,17 +261,26 @@ func main() {
 
 	// Grid
 
+	// // TODO songFlex is probably better named "contentFlex"
+	// or it will be when I have other things to populate it with
+	// I don't know how the page system works in cview though
 	songFlex = cview.NewFlex()
-	songFlex.AddItem(searchBox, 0, 1, false)
-	songFlex.AddItem(songList, 0, 6, false)
+	songFlex.SetBorder(true)
+	songFlex.AddItem(songList, 0, 3, false)
+
+	navFlex = cview.NewFlex()
+	navFlex.AddItem(searchBox, 0, 1, true)
 
 	controlsFlex = cview.NewFlex()
 	controlsFlex.AddItem(playButton, 0, 1, false)
 	controlsFlex.AddItem(progressBar, 0, 1, false)
 	controlsFlex.AddItem(volumeText, 0, 1, false)
+	controlsFlex.SetBorder(true)
 
 	rootFlex = cview.NewFlex()
-	rootFlex.AddItem(songFlex, 0, 1, false)
+	rootFlex.SetDirection(cview.FlexRow)
+	rootFlex.AddItem(navFlex, 0, 1, false)
+	rootFlex.AddItem(songFlex, 0, 10, false)
 	rootFlex.AddItem(controlsFlex, 0, 1, false)
 
 	// Keyboard input
@@ -266,7 +292,7 @@ func main() {
 	})
 
 	frame := cview.NewFrame(rootFlex)
-	frame.AddText("Youtube Music CLI", true, cview.AlignCenter, tcell.ColorHotPink)
+	frame.AddText("Youtube Music CLI", true, cview.AlignCenter, tcell.ColorDarkGreen)
 
 	app.SetRoot(frame, true)
 	app.EnableMouse(true)
