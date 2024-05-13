@@ -17,7 +17,7 @@ import (
 	"github.com/sanity-io/litter"
 )
 
-var ErrFoundInCache = errors.New("found in cache")
+var ErrAlreadyDownloaded = errors.New("found in cache")
 
 type YTMClient struct {
 	oauthToken string
@@ -39,10 +39,13 @@ func New(token string, id string, cachePath string) (*YTMClient, error) {
 }
 
 func (ytm *YTMClient) DownloadVideo(videoId string) error {
+	var fullPath string
 	if ytm.cachePath != "" {
-		_, err := os.Open(filepath.Join(ytm.cachePath, videoId+".mp4"))
+		fullPath = filepath.Join(ytm.cachePath, videoId+".mp4")
+		_, err := os.Open(fullPath)
 		if err == nil {
-			return ErrFoundInCache
+			log.Println("DownloadVideo(): already downloaded", videoId)
+			return ErrAlreadyDownloaded
 		}
 	}
 
@@ -80,7 +83,7 @@ func (ytm *YTMClient) GetSong(videoId string) (map[string]any, error) {
 	var returnErr error
 	result, err := ytm.runPyScript(fmt.Sprintf("ytmusic.get_song('%s')", videoId))
 	if err != nil {
-		return nil, errors.Wrapf(err, "GetSong() failed getting song")
+		return nil, fmt.Errorf("GetSong() failed getting song: %w", err)
 	}
 
 	err = json.Unmarshal([]byte(result), &song)

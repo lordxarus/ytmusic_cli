@@ -36,6 +36,9 @@ var (
 	brandId    string
 	logging    = false
 	ytm        *yt.YTMClient
+	// TODO Not sure if I want these here
+	decoderKeepAlive  = make(chan bool, 1)
+	progressBarRunner *tickerBar
 )
 
 const (
@@ -88,6 +91,7 @@ func init() {
 	if err = os.MkdirAll(cachePath, 0o750); err != nil {
 		log.Fatalf("init() couldn't create cache directory: %s", err)
 	}
+	log.Println("successfully started ytmusic_cli")
 }
 
 // TODO We can rewrite this to only use beep
@@ -101,7 +105,11 @@ func init() {
 // TODO Use ffplay instead of beep
 // TODO Handling of a song's completion
 func main() {
-	// DON'T REMOVE THIS. ERR GETS SHADOWED
+	// DON'T REMOVE THIS.
+	// If you use the form: value, ok := something() and
+	// you've declared value outside that scope it will be shadowed.
+	// You'll be working with the shadowed value instead of the value
+	// assigned elsewhere.
 	var err error
 
 	// Flex boxes
@@ -115,8 +123,9 @@ func main() {
 
 	// Play button
 	var playButton *cview.Button
-	pauseLabel := "⏸️"
-	playLabel := "▶️"
+	// Nerd fonts
+	pauseLabel := "󰏥"
+	playLabel := ""
 
 	// Song list
 	var songList *cview.List
@@ -124,7 +133,6 @@ func main() {
 
 	// Progress bar
 	var progressBar *cview.ProgressBar
-	var progressBarRunner *tickerBar
 
 	// Volume bar
 	var volumeBar *cview.ProgressBar
@@ -153,8 +161,6 @@ func main() {
 		log.Fatalf("main() initial query failed: %s", err)
 	}
 
-	killDecoder := make(chan bool, 10)
-
 	err = ytm.DownloadVideo(songResults[0].VideoId)
 	if err != nil && !errors.Is(err, yt.ErrAlreadyDownloaded) {
 		log.Fatalf("main() failed to download video: %s", err)
@@ -178,7 +184,7 @@ func main() {
 
 		// play song
 		go func(callback func()) {
-			err = play(song, volumeEffect, killDecoder)
+			err = play(song, volumeEffect)
 			if err != nil {
 				log.Fatalf("playSong(): failed to play: %s", err)
 			}
@@ -189,8 +195,6 @@ func main() {
 			app.Draw(controlsFlex)
 		})
 	}
-
-	// #181933
 
 	purple := tcell.Color98
 	pink := tcell.ColorPaleVioletRed
@@ -212,8 +216,10 @@ func main() {
 	// Play button
 	// Can use VolumeEffect.Silent to play/pause
 	playButton = cview.NewButton(playLabel)
-	playButton.SetCursorRune(rune(0))
+	playButton.SetCursorRune(0)
 	playButton.SetPadding(0, 1, 0, 0)
+	playButton.SetLabelColor(tcell.ColorAntiqueWhite)
+	playButton.SetLabelColorFocused(tcell.ColorAntiqueWhite)
 	playButton.SetBackgroundColor(purple)
 	playButton.SetBackgroundColorFocused(pink)
 	playButton.SetSelectedFunc(
@@ -225,7 +231,7 @@ func main() {
 			// We are playing
 			case pauseLabel:
 				progressBarRunner.stop()
-				killDecoder <- true
+				decoderKeepAlive <- true
 				// TODO Maybe VolumeEffect.Silent
 				// should be the play/pause state. Because if a user mutes the volume
 				// it will as of now pause anyway which isn't really the behavior I want
@@ -408,13 +414,14 @@ func createSongList(songs []yt.Song,
 	return songList
 }
 
-func play(song yt.Song, volume *effects.Volume, kill <-chan bool) error {
+func play(song yt.Song, volume *effects.Volume) error {
 	log.Printf("starting download of %s, ID: %s", song.Title, song.VideoId)
 	err := ytm.DownloadVideo(song.VideoId)
 	if err != nil && !errors.Is(err, yt.ErrAlreadyDownloaded) {
 		return fmt.Errorf("play(): %w", err)
 	}
-	_, streamer, err := loadAudio(filepath.Join(cachePath, song.VideoId+".mp4"), kill)
+	// TODO We always assume mp4 here. We should check the file extension
+	_, streamer, err := loadAudio(filepath.Join(cachePath, song.VideoId+".mp4"))
 	if err != nil {
 		return fmt.Errorf("play(): %w", err)
 	}
@@ -424,14 +431,14 @@ func play(song yt.Song, volume *effects.Volume, kill <-chan bool) error {
 	return nil
 }
 
-func loadAudio(path string, killDecoder <-chan bool) (*reisen.Media, beep.Streamer, error) {
+func loadAudio(path string) (*reisen.Media, beep.Streamer, error) {
 	media, err := reisen.NewMedia(path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("loadAudio(): Unable to create new media %w", err)
 	}
 
 	var sampleSource <-chan [2]float64
-	sampleSource, errs, err := readVideoAndAudio(media, killDecoder)
+	sampleSource, errs, err := readVideoAndAudio(media)
 	if err != nil {
 		return nil, nil, fmt.Errorf("loadAudio(): %w", err)
 	}
@@ -448,7 +455,8 @@ func loadAudio(path string, killDecoder <-chan bool) (*reisen.Media, beep.Stream
 
 	// See https://github.com/faiface/beep/wiki/Making-own-streamers
 	// for reference.
-	// beep.StreamerFunc(func) is a type cast
+	// beep.StreamerFunc(func(...)(n int, ok bool)) is a type cast
+	// casting a function to a beep.StreamerFunc
 	streamer := beep.StreamerFunc(func(samples [][2]float64) (n int, ok bool) {
 		numRead := 0
 
@@ -478,7 +486,7 @@ func loadAudio(path string, killDecoder <-chan bool) (*reisen.Media, beep.Stream
 // readVideoAndAudio reads video and audio frames
 // from the opened media and sends the decoded
 // data to the channels to be played.
-func readVideoAndAudio(media *reisen.Media, isRunning <-chan bool) (<-chan [2]float64, chan error, error) {
+func readVideoAndAudio(media *reisen.Media) (<-chan [2]float64, chan error, error) {
 	sampleBuffer := make(chan [2]float64, sampleBufferSize)
 	errs := make(chan error, 50)
 
@@ -510,7 +518,7 @@ func readVideoAndAudio(media *reisen.Media, isRunning <-chan bool) (<-chan [2]fl
 	L:
 		for {
 			select {
-			case <-isRunning:
+			case <-decoderKeepAlive:
 			default:
 				break L
 			}
@@ -522,7 +530,7 @@ func readVideoAndAudio(media *reisen.Media, isRunning <-chan bool) (<-chan [2]fl
 	Loop:
 		for {
 			select {
-			case <-isRunning:
+			case <-decoderKeepAlive:
 				break Loop
 			default:
 			}
@@ -590,6 +598,7 @@ func readVideoAndAudio(media *reisen.Media, isRunning <-chan bool) (<-chan [2]fl
 		}
 
 		log.Printf("readVideoAndAudio(): decoder goroutine: exiting")
+		progressBarRunner.stop()
 		audioStream.Close()
 		media.CloseDecode()
 		close(sampleBuffer)
