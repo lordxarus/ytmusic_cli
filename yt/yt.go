@@ -78,20 +78,7 @@ func (ytm *YTMClient) DownloadVideo(videoId string) error {
 	return nil
 }
 
-func (ytm *YTMClient) GetSong(videoId string) (map[string]any, error) {
-	song := make(map[string]any)
-	var returnErr error
-	result, err := ytm.runPyScript(fmt.Sprintf("ytmusic.get_song('%s')", videoId))
-	if err != nil {
-		return nil, fmt.Errorf("GetSong() failed getting song: %w", err)
-	}
-
-	err = json.Unmarshal([]byte(result), &song)
-	if err != nil {
-		return nil, fmt.Errorf("GetSong() unable to unmarshal JSON")
-	}
-	return song, returnErr
-}
+// For now I need a string for AddToHistory()
 
 func (ytm *YTMClient) Home() (home.Results, error) {
 	results := make(home.Results, 3)
@@ -110,7 +97,7 @@ func (ytm *YTMClient) Home() (home.Results, error) {
 	return results, returnErr
 }
 
-func (ytm *YTMClient) Query(query string, filter search.Filter) ([]Song, error) {
+func (ytm *YTMClient) Search(query string, filter search.Filter) ([]Song, error) {
 	var returnErr error
 
 	result, err := ytm.runPyScript(fmt.Sprintf("ytmusic.search('%s', filter='%s')", query, filter))
@@ -127,8 +114,27 @@ func (ytm *YTMClient) Query(query string, filter search.Filter) ([]Song, error) 
 	return songResults, returnErr
 }
 
+func (ytm *YTMClient) GetSong(videoId string) (string, error) {
+	// song := make(map[string]any)
+	var returnErr error
+	result, err := ytm.runPyScript(fmt.Sprintf("ytmusic.get_song('%s')", videoId))
+	if err != nil {
+		return "", fmt.Errorf("GetSong() failed getting song: %w", err)
+	}
+
+	// err = json.Unmarshal([]byte(result), &song)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("GetSong() unable to unmarshal JSON")
+	// }
+	return result, returnErr
+}
+
 func (ytm *YTMClient) AddToHistory(videoId string) error {
-	res, err := ytm.runPyScript(fmt.Sprintf("ytmusic.add_to_history('%s')", videoId))
+	song, err := ytm.GetSong(videoId)
+	if err != nil {
+		return fmt.Errorf("AddToHistory(): %w", err)
+	}
+	res, err := ytm.runPyScript(fmt.Sprintf("ytmusic.add_history_item(json.load('%s'))", song))
 	if err != nil {
 		return fmt.Errorf("AddToHistory(): failed to add to history: %w", err)
 	}
@@ -166,11 +172,11 @@ import json
 			
 # https://stackoverflow.com/questions/36021332/how-to-prettyprint-human-readably-print-a-python-dict-in-json-format-double-q
 print(json.dumps(
-	res,
-	sort_keys=True,
-	indent=4,
-	separators=(',', ': ')
-))`, ytm.oauthToken, ytm.brandId, script))
+ 	res,
+ 	sort_keys=True,
+ 	indent=4,
+ 	separators=(',', ': ')
+ ))`, ytm.oauthToken, ytm.brandId, script))
 
 	stdout, err := cmd.Output()
 	if err != nil {

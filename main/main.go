@@ -156,7 +156,7 @@ func main() {
 
 	query := "Best Classical Music"
 
-	songResults, err = ytm.Query(query, search.Songs)
+	songResults, err = ytm.Search(query, search.Songs)
 	if err != nil {
 		log.Fatalf("main() initial query failed: %s", err)
 	}
@@ -187,6 +187,10 @@ func main() {
 			err = play(song, volumeEffect)
 			if err != nil {
 				log.Fatalf("playSong(): failed to play: %s", err)
+			}
+			err = ytm.AddToHistory(song.VideoId)
+			if err != nil {
+				log.Printf("playSong(): routine: %s", err)
 			}
 			callback()
 		}(func() {
@@ -255,7 +259,7 @@ func main() {
 	searchField.SetFieldTextColor(tcell.ColorBlack)
 	searchField.SetDoneFunc(func(key tcell.Key) {
 		if key == tcell.KeyEnter {
-			query, err := ytm.Query(searchField.GetText(), search.Songs)
+			query, err := ytm.Search(searchField.GetText(), search.Songs)
 			if err != nil {
 				log.Fatalf("failed to search: %s", err)
 			}
