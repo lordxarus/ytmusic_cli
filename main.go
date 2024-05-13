@@ -90,8 +90,6 @@ func init() {
 	}
 }
 
-// TODO Can use struct tags here? https://www.digitalocean.com/community/tutorials/how-to-use-struct-tags-in-go
-
 // TODO We can rewrite this to only use beep
 // TODO Beep supports playing and pausing
 // TODO I should probably create my own types for use in my own internal stuff.
@@ -134,21 +132,18 @@ func main() {
 		Silent:   false,
 	}
 
-	// Load environment variables
-
-	ytm = yt.New(oauthToken, brandId)
-
+	// Create YTM client
+	ytm, err := yt.New(oauthToken, brandId, cachePath)
+	if err != nil {
+		log.Fatalf("main() failed to create ytm client: %s", err)
+	}
 	// Init speaker
-	err := speaker.Init(sampleRate, SpeakerSampleRate.N(time.Second/10))
+	err = speaker.Init(sampleRate, SpeakerSampleRate.N(time.Second/10))
 	if err != nil {
 		log.Fatalf("main() unable to init speaker: %s", err)
 	}
 
 	query := "Best Classical Music"
-	// TODO Temp
-	if len(os.Args) > 2 {
-		query = os.Args[1]
-	}
 
 	songResults, err = ytm.Query(query, search.Songs)
 	if err != nil {
@@ -157,7 +152,7 @@ func main() {
 
 	killDecoder := make(chan bool, 10)
 
-	err = yt.DownloadVideo(songResults[0].VideoId, cachePath, true)
+	err = ytm.DownloadVideo(songResults[0].VideoId)
 	if err != nil {
 		log.Fatalf("main() failed to download video: %s", err)
 	}
@@ -392,7 +387,7 @@ func createSongList(songs []yt.Song,
 
 func play(song yt.Song, volume *effects.Volume, kill <-chan bool) error {
 	log.Printf("starting download of %s, ID: %s", song.Title, song.VideoId)
-	err := yt.DownloadVideo(song.VideoId, cachePath, true)
+	err := ytm.DownloadVideo(song.VideoId)
 	if err != nil {
 		return fmt.Errorf("play(): %w", err)
 	}

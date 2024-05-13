@@ -2,6 +2,7 @@ package yt
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -13,31 +14,38 @@ import (
 	"github.com/kkdai/youtube/v2"
 	"github.com/lordxarus/ytmusic_cli/yt/home"
 	"github.com/lordxarus/ytmusic_cli/yt/search"
-	"github.com/pkg/errors"
 	"github.com/sanity-io/litter"
 )
+
+var ErrFoundInCache = errors.New("found in cache")
 
 type YTMClient struct {
 	oauthToken string
 	brandId    string
+	cachePath  string
 }
 
-func New(token string, id string) *YTMClient {
-	return &YTMClient{
+func New(token string, id string, cachePath string) (*YTMClient, error) {
+	client := &YTMClient{
 		token,
 		id,
+		cachePath,
 	}
+	_, err := client.Home()
+	if err != nil {
+		return nil, fmt.Errorf("New() sanity check failed: %w", err)
+	}
+	return client, nil
 }
 
-func DownloadVideo(videoId string, cacheDir string, useCache bool) error {
-	fullPath := filepath.Join(cacheDir, videoId+".mp4")
-	if useCache {
-		_, err := os.Open(fullPath)
+func (ytm *YTMClient) DownloadVideo(videoId string) error {
+	if ytm.cachePath != "" {
+		_, err := os.Open(filepath.Join(ytm.cachePath, videoId+".mp4"))
 		if err == nil {
-			log.Printf("found %s in cache", videoId)
-			return nil
+			return ErrFoundInCache
 		}
 	}
+
 	client := youtube.Client{}
 
 	video, err := client.GetVideo(videoId)
@@ -77,7 +85,7 @@ func (ytm *YTMClient) GetSong(videoId string) (map[string]any, error) {
 
 	err = json.Unmarshal([]byte(result), &song)
 	if err != nil {
-		return nil, errors.Wrap(err, "GetSong() unable to unmarshal JSON")
+		return nil, fmt.Errorf("GetSong() unable to unmarshal JSON")
 	}
 	return song, returnErr
 }
@@ -88,12 +96,12 @@ func (ytm *YTMClient) Home() (home.Results, error) {
 
 	result, err := ytm.runPyScript("ytmusic.get_home()")
 	if err != nil {
-		return nil, errors.Wrap(err, "Home() failed getting home results")
+		return nil, fmt.Errorf("Home() failed getting home results: %w", err)
 	}
 
 	err = json.Unmarshal([]byte(result), &results) // https://betterstack.com/community/guides/scaling-go/json-in-go/
 	if err != nil {
-		returnErr = errors.Wrap(err, "Home() unable to marshal JSON")
+		returnErr = fmt.Errorf("Home() unable to marshal JSON", err)
 	}
 
 	return results, returnErr
