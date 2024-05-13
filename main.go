@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -46,44 +47,9 @@ const (
 	gKillDecoderBufferSize                 = 50
 )
 
-// TODO Can use struct tags here? https://www.digitalocean.com/community/tutorials/how-to-use-struct-tags-in-go
-
-// TODO We can rewrite this to only use beep
-// TODO Beep supports playing and pausing
-// TODO I should probably create my own types for use in my own internal stuff.
-// I currently have the Song result that you get from the search end point implemented.
-// But when I go to, for example, implement the Song result type that you would get from
-// the home screen it will be a completely different Song type. So I need to namespace them
-// similarly to ytmusicapi. Based on which endpoint they come from. yt.search.Song and yt.home.Song or something.
-// And then I can have my own Song type for my GUI which will include only what I need.
-// TODO Use ffplay instead of beep
-func main() {
+func init() {
 	var ok bool
 	var err error
-	var songResults []yt.Song
-
-	var rootFlex *cview.Flex
-	var songFlex *cview.Flex
-	var navFlex *cview.Flex
-	var controlsFlex *cview.Flex
-
-	var searchBox *cview.InputField
-
-	var playButton *cview.Button
-	pauseLabel := "⏸️"
-	playLabel := "▶️"
-
-	var songList *cview.List
-	var progressBar *cview.ProgressBar
-
-	var volumeText *cview.TextView
-
-	var volumeEffect *effects.Volume = &effects.Volume{
-		Streamer: nil,
-		Base:     2,
-		Volume:   -1.0,
-		Silent:   false,
-	}
 
 	if err := godotenv.Load(); err != nil {
 		log.Fatal("set your oauth token through a .env file")
@@ -108,27 +74,72 @@ func main() {
 	}
 
 	if homePath, ok = os.LookupEnv("HOME"); !ok {
-		log.Fatalf("main() couldn't find home directory")
+		log.Fatalf("init() couldn't find home directory")
 	}
 
 	cachePath = homePath + "/.cache/ytmusic_cli"
 
 	if wdPath, err = os.Getwd(); err != nil {
-		log.Fatalf("main() couldn't find working directory: %s", err)
+		log.Fatalf("init() couldn't find working directory: %s", err)
 	}
 
-	log.Printf("Home: %s", homePath)
-	log.Printf("Cache: %s", cachePath)
-	log.Printf("Working Dir: %s", wdPath)
+	log.Printf("init(): home: %s cache: %s wd: %s", homePath, cachePath, wdPath)
 
 	if err = os.MkdirAll(cachePath, 0o750); err != nil {
-		log.Fatalf("main() couldn't create cache directory: %s", err)
+		log.Fatalf("init() couldn't create cache directory: %s", err)
 	}
+}
+
+// TODO Can use struct tags here? https://www.digitalocean.com/community/tutorials/how-to-use-struct-tags-in-go
+
+// TODO We can rewrite this to only use beep
+// TODO Beep supports playing and pausing
+// TODO I should probably create my own types for use in my own internal stuff.
+// I currently have the Song result that you get from the search end point implemented.
+// But when I go to, for example, implement the Song result type that you would get from
+// the home screen it will be a completely different Song type. So I need to namespace them
+// similarly to ytmusicapi. Based on which endpoint they come from. yt.search.Song and yt.home.Song or something.
+// And then I can have my own Song type for my GUI which will include only what I need.
+// TODO Use ffplay instead of beep
+// TODO Handling of a song's completion
+func main() {
+	// Flex boxes
+	var rootFlex *cview.Flex
+	var mainFlex *cview.Flex
+	var navFlex *cview.Flex
+	var controlsFlex *cview.Flex
+
+	// Search field
+	var searchField *cview.InputField
+
+	// Play button
+	var playButton *cview.Button
+	pauseLabel := "⏸️"
+	playLabel := "▶️"
+
+	// Song list
+	var songList *cview.List
+	var songResults []yt.Song
+
+	// Progress bar
+	var progressBar *cview.ProgressBar
+	var progressBarRunner *tickerBar
+
+	// Volume bar
+	var volumeBar *cview.ProgressBar
+	var volumeEffect *effects.Volume = &effects.Volume{
+		Streamer: nil,
+		Base:     2,
+		Volume:   -1.0,
+		Silent:   false,
+	}
+
+	// Load environment variables
 
 	ytm = yt.New(oauthToken, brandId)
 
 	// Init speaker
-	err = speaker.Init(sampleRate, SpeakerSampleRate.N(time.Second/10))
+	err := speaker.Init(sampleRate, SpeakerSampleRate.N(time.Second/10))
 	if err != nil {
 		log.Fatalf("main() unable to init speaker: %s", err)
 	}
@@ -152,37 +163,51 @@ func main() {
 	}
 
 	// Called when a song is selected on the songList or when play is pressed
-	songSelected := func() {
+	playSong := func() {
+		progressBarRunner.stop()
 		// *selectedSong = song
 		song, ok := songList.GetCurrentItem().GetReference().(yt.Song)
 		if !ok {
-			log.Printf("playButton: no song selected, skipping")
+			log.Printf("playSong(): no song selected, skipping")
 			return
 		}
+
+		// debug logging
 		now := time.Now()
 		done := now.Add(time.Second * time.Duration(song.Duration_Seconds))
 		log.Printf("playButton: starting at: %s. expected song end: %s",
 			now.Format(time.Stamp), done.Format(time.Stamp))
-		err = play(song, volumeEffect, killDecoder)
-		if err != nil {
-			log.Fatalf("playButton: failed to play: %s", err)
-		}
-		playButton.SetLabel(pauseLabel)
+
+		// play song
+		go func(callback func()) {
+			err = play(song, volumeEffect, killDecoder)
+			if err != nil {
+				log.Fatalf("playSong(): failed to play: %s", err)
+			}
+			callback()
+		}(func() {
+			progressBarRunner.start(time.Second * time.Duration(song.Duration_Seconds))
+			playButton.SetLabel(pauseLabel)
+			app.Draw(playButton)
+		})
 	}
 
 	// Build CUI
 
 	// Play button
-	// Can actually use VolumeEffect to control play/pause
-	// when you set silent to true it will pause the stream
+	// Can use VolumeEffect.Silent to play/pause
 	playButton = cview.NewButton(playLabel)
+	playButton.SetCursorRune(rune(0))
 	playButton.SetPadding(0, 1, 0, 0)
 	playButton.SetSelectedFunc(
 		func() {
 			switch playButton.GetLabel() {
+			// We are paused
 			case playLabel:
-				songSelected()
+				playSong()
+			// We are playing
 			case pauseLabel:
+				progressBarRunner.stop()
 				killDecoder <- true
 				// TODO Maybe VolumeEffect.Silent
 				// should be the play/pause state. Because if a user mutes the volume
@@ -198,96 +223,140 @@ func main() {
 		})
 
 	// Song list
-
-	songList = createSongList(songResults, songSelected)
+	songList = createSongList(songResults, playSong)
 
 	// Search box
-	searchBox = cview.NewInputField()
-	searchBox.SetLabel("Search: ")
-	searchBox.SetBorder(true)
-	searchBox.SetDoneFunc(func(key tcell.Key) {
+	searchField = cview.NewInputField()
+	searchField.SetLabel("Search: ")
+	searchField.SetBorder(true)
+	searchField.SetDoneFunc(func(key tcell.Key) {
 		if key == tcell.KeyEnter {
-			query, err := ytm.Query(searchBox.GetText(), search.Songs)
+			query, err := ytm.Query(searchField.GetText(), search.Songs)
 			if err != nil {
 				log.Fatalf("failed to search: %s", err)
 			}
-			newList := createSongList(query, songSelected)
+			newList := createSongList(query, playSong)
 			app.Lock()
-			songFlex.RemoveItem(songList)
-			songFlex.AddItem(newList, 0, 6, false)
+			mainFlex.RemoveItem(songList)
+			mainFlex.AddItem(newList, 0, 6, false)
 			songList = newList
 			app.Unlock()
 			app.Draw()
+
 		}
 	})
 
-	// Volume text
-	volumeText = cview.NewTextView()
-	volumeText.SetText("1.0")
-	volumeText.SetBorder(true)
-	volumeText.SetMouseCapture(func(action cview.MouseAction, event *tcell.EventMouse) (cview.MouseAction, *tcell.EventMouse) {
-		if action == cview.MouseScrollUp {
-			volumeEffect.Volume += .1
-		} else if action == cview.MouseScrollDown {
-			volumeEffect.Volume -= .1
-		} else if action == cview.MouseMiddleClick {
-			if volumeEffect.Silent {
-				volumeEffect.Silent = false
-				volumeText.SetTextColor(tcell.ColorDefault)
-			} else {
-				volumeEffect.Silent = true
-				volumeText.SetTextColor(tcell.ColorGray)
+	// Volume bar
+	volumeBar = cview.NewProgressBar()
+	{
+		maxVol := 1.0
+		minVol := -5.0
+		volStep := 0.1
+		volStepBig := 0.25
+
+		displayVolume := func() int { return int(100 * (math.Abs(minVol) + volumeEffect.Volume) / (maxVol + math.Abs(minVol))) }
+
+		volumeBar.SetTitle(strconv.Itoa(displayVolume()))
+		volumeBar.SetProgress(30)
+		volumeBar.SetBorder(true)
+		volumeBar.SetFilledColor(tcell.ColorGreen)
+
+		// Mouse input
+		volumeBar.SetMouseCapture(func(action cview.MouseAction, event *tcell.EventMouse) (cview.MouseAction, *tcell.EventMouse) {
+			doStep := volStep
+			vol := &volumeEffect.Volume
+			if (event.Modifiers() & tcell.ModShift) != 0 {
+				println("shift")
+				doStep = volStepBig
 			}
-		}
 
-		volStr := strconv.FormatFloat(volumeEffect.Volume, 'f', 2, 64)
-		volumeText.SetText(volStr)
-		app.Draw(volumeText)
+			switch action {
+			case cview.MouseScrollUp:
+				if *vol+doStep >= maxVol {
+					*vol = maxVol
+				} else {
+					*vol += doStep
+				}
+			case cview.MouseScrollDown:
+				// TODO This is a bit of a hack.
+				// A better solution would be a function that increases
+				// the step size based on how close it is to minVol. Calculus?
+				// Instead of doing that we just double step size after arbitrary
+				// point. Feels similar to me.
+				if *vol <= -2.5 {
+					doStep *= 2
+				}
+				if *vol-doStep <= minVol {
+					*vol = minVol
+				} else {
+					*vol -= doStep
+				}
+			case cview.MouseMiddleClick:
+				if volumeEffect.Silent {
+					volumeEffect.Silent = false
+					volumeBar.SetTitleColor(tcell.ColorDefault)
+				} else {
+					volumeEffect.Silent = true
+					volumeBar.SetTitleColor(tcell.ColorGray)
+				}
 
-		return action, event
-	})
+			}
+
+			// TODO What happens on a 32 bit system with FormatFloat's bitness arg?
+			// volStr := strconv.FormatFloat(volumeEffect.Volume, 'f', 2, 64)
+			// volumeBar.SetTitle(volStr)
+
+			volumeBar.SetProgress(displayVolume())
+			volumeBar.SetTitle(strconv.Itoa(displayVolume()))
+
+			app.QueueUpdateDraw(func() {}, volumeBar)
+
+			return action, event
+		})
+	}
 
 	// Progress bar
 
 	progressBar = cview.NewProgressBar()
-	progressBar.SetProgress(10)
+	progressBar.SetBorder(true)
 
-	// go func() {
-	// 	for now := range time.Tick(100 * time.Millisecond) {
-	// 		log.Printf("BUCKSHOT %d", now.Unix())
-	// 		log.Default()
-	// 	}
-	// }()
-
-	// Grid
+	progressBarRunner = newTickerBar(app, progressBar)
 
 	// // TODO songFlex is probably better named "contentFlex"
 	// or it will be when I have other things to populate it with
 	// I don't know how the page system works in cview though
-	songFlex = cview.NewFlex()
-	songFlex.SetBorder(true)
-	songFlex.AddItem(songList, 0, 3, false)
+	mainFlex = cview.NewFlex()
+	mainFlex.SetBorder(true)
+	mainFlex.AddItem(songList, 0, 3, false)
 
 	navFlex = cview.NewFlex()
-	navFlex.AddItem(searchBox, 0, 1, true)
+	navFlex.AddItem(searchField, 0, 1, true)
 
 	controlsFlex = cview.NewFlex()
+	// This fixedSize number is either rows or colums based on the direction of the flex, default is cols
 	controlsFlex.AddItem(playButton, 0, 1, false)
-	controlsFlex.AddItem(progressBar, 0, 1, false)
-	controlsFlex.AddItem(volumeText, 0, 1, false)
+	controlsFlex.AddItem(progressBar, 0, 5, false)
+	controlsFlex.AddItem(volumeBar, 0, 2, false)
 	controlsFlex.SetBorder(true)
 
 	rootFlex = cview.NewFlex()
 	rootFlex.SetDirection(cview.FlexRow)
 	rootFlex.AddItem(navFlex, 0, 1, false)
-	rootFlex.AddItem(songFlex, 0, 10, false)
+	rootFlex.AddItem(mainFlex, 0, 8, false)
 	rootFlex.AddItem(controlsFlex, 0, 1, false)
 
 	// Keyboard input
 	rootFlex.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Key() == tcell.KeyEsc {
+		switch event.Key() {
+		case tcell.KeyCtrlC, tcell.KeyEsc:
 			app.Stop()
 		}
+
+		switch event.Rune() {
+		case 'q':
+			app.Stop()
+		}
+
 		return event
 	})
 
@@ -296,6 +365,7 @@ func main() {
 
 	app.SetRoot(frame, true)
 	app.EnableMouse(true)
+
 	if err := app.Run(); err != nil {
 		log.Fatalf("Failed to run app: %s", err)
 	}
@@ -319,56 +389,6 @@ func createSongList(songs []yt.Song,
 	}
 	return songList
 }
-
-// func query(query string, filter search.Filter) []yt.Song {
-// 	// Search
-
-// 	// // TODO EMBEDDED PYTHON VERSION
-// 	// fs, err := embed_util.NewEmbeddedFiles(data.Data, "ytmusicapi")
-// 	// if err != nil {
-// 	// 	log.Printf("Failed to new embedded files %s", err)
-// 	// }
-// 	// ep, err := python.NewEmbeddedPython("ytmusicapi")
-// 	// if err != nil {
-// 	// 	log.Printf("Failed to created embedded python %s", err)
-// 	// }
-// 	// ep.AddPythonPath(fs.GetExtractedPath())
-
-// 	cmd := exec.Command("python3", "-c", fmt.Sprintf(
-// 		`
-// from ytmusicapi import YTMusic
-// import sys
-
-// ytmusic = YTMusic('%s', '%s')
-
-// res = ytmusic.search('%s', filter='%s')
-
-// import json
-
-// # https://stackoverflow.com/questions/36021332/how-to-prettyprint-human-readably-print-a-python-dict-in-json-format-double-q
-// print(json.dumps(
-// 	res,
-// 	sort_keys=True,
-// 	indent=4,
-// 	separators=(',', ': ')
-// ))`,
-// 		oauthToken, brandId, query, filter))
-
-// 	// pyCmd := ep.PythonCmd
-
-// 	stdout, err := cmd.Output()
-// 	if err != nil {
-// 		log.Fatalln(errors.Wrap(err, "Failed to run query."))
-// 	}
-
-// 	songResults := make([]yt.Song, 50)
-
-// 	err = json.Unmarshal(stdout, &songResults) // https://betterstack.com/community/guides/scaling-go/json-in-go/
-// 	if err != nil {
-// 		log.Fatalf("Unable to marshal JSON due to %s", err)
-// 	}
-// 	return songResults
-// }
 
 func play(song yt.Song, volume *effects.Volume, kill <-chan bool) error {
 	log.Printf("starting download of %s, ID: %s", song.Title, song.VideoId)
@@ -439,7 +459,7 @@ func loadAudio(path string, killDecoder <-chan bool) (*reisen.Media, beep.Stream
 // https://medium.com/@maximgradan/playing-videos-with-golang-83e67447b111
 // readVideoAndAudio reads video and audio frames
 // from the opened media and sends the decoded
-// data to che channels to be played.
+// data to the channels to be played.
 func readVideoAndAudio(media *reisen.Media, isRunning <-chan bool) (<-chan [2]float64, chan error, error) {
 	sampleBuffer := make(chan [2]float64, sampleBufferSize)
 	errs := make(chan error, 50)
